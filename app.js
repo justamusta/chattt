@@ -1,43 +1,81 @@
-const http         = require('http'),
-      fs           = require('fs'),
-      path         = require('path'),
-      contentTypes = require('./utils/content-types'),
-      sysInfo      = require('./utils/sys-info'),
-      env          = process.env;
+var express = require('express');
+var http = require('http');
+var path=require('path');
+var config = require('config');
+var mongoose = require('libs/mongoose');
+var errorHandler = express.errorHandler();
+var HttpError = require('error').HttpError;
 
-let server = http.createServer(function (req, res) {
-  let url = req.url;
-  if (url == '/') {
-    url += 'index.html';
-  }
 
-  // IMPORTANT: Your application HAS to respond to GET /health with status 200
-  //            for OpenShift health monitoring
+var log = require('libs/log.js')(module);
 
-  if (url == '/health') {
-    res.writeHead(200);
-    res.end();
-  } else if (url.indexOf('/info/') == 0) {
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Cache-Control', 'no-cache, no-store');
-    res.end(JSON.stringify(sysInfo[url.slice(6)]()));
-  } else {
-    fs.readFile('./static' + url, function (err, data) {
-      if (err) {
-        res.writeHead(404);
-        res.end();
-      } else {
-        let ext = path.extname(url).slice(1);
-        res.setHeader('Content-Type', contentTypes[ext]);
-        if (ext === 'html') {
-          res.setHeader('Cache-Control', 'no-cache, no-store');
-        }
-        res.end(data);
-      }
-    });
+
+var app = express();
+app.engine('ejs', require('ejs-locals'));
+
+
+app.set('views', path.join(__dirname, 'views'));
+app.set('view engine', 'ejs');
+
+
+
+app.use(express.favicon());
+if(app.get('env')=='development'){
+app.use(express.logger('dev'));
+}else{
+app.use(express.logger('default'));	
+}
+
+//app.use(express.bodyParser());
+
+app.use(express.json());
+app.use(express.urlencoded());
+
+app.use(express.cookieParser());
+
+var sessionStore = require('libs/sessionStore');
+
+app.use(express.session({
+	secret: config.get('session:secret'),
+	key:config.get('session:key'),
+	cookie:config.get('session:cookie'),
+	store: sessionStore
+}));
+
+app.use(require('middleware/sendHttpError'));
+app.use(require('middleware/loadUser'));
+
+app.use(app.router);
+
+require('routes')(app);
+
+
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+
+app.use(function(err,req,res,next){
+	if(typeof err == 'number'){
+		err = new HttpError(err);
+	}
+
+	if(err instanceof HttpError){
+		res.sendHttpError(err);
+	}else{
+	if(app.get('env')=='development'){
+	return 	errorHandler(err,req,res,next);
+	}else{
+		log.error(err);
+		err = new HttpError(500);
+		res.sendHttpError(err);
+	}
   }
 });
 
-server.listen(env.NODE_PORT || 3000, env.NODE_IP || 'localhost', function () {
-  console.log(`Application worker ${process.pid} started...`);
+var server = http.createServer(app);
+server.listen(config.get('port'), function(){
+  log.info('Express server listening on port ' + config.get('port'));
 });
+
+var io = require("./socket/index.js")(server);
+app.set("io",io);
